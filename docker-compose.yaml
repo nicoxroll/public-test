@@ -1,0 +1,202 @@
+services:
+  api:
+    build:
+      context: ./api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./api:/app
+      - ./api/uploads:/app/uploads
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/laplace
+      - BERT_SERVICE_URL=http://laplace_bert_service:5000
+      - REDIS_URL=redis://redis:6379/0
+      - RABBITMQ_URL=amqp://admin:securepass123@rabbitmq:5672
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=admin
+      - RABBITMQ_PASS=securepass123
+      - RABBITMQ_VHOST=/
+      - WEAVIATE_URL=http://weaviate:8080
+      - WEAVIATE_GRPC_PORT=50051
+      - SECRET_KEY=your-secure-secret-key-replace-this-in-production
+      - GITHUB_ID=${GITHUB_ID}
+      - GITHUB_SECRET=${GITHUB_SECRET}
+      - GITLAB_ID=${GITLAB_ID}
+      - GITLAB_SECRET=${GITLAB_SECRET}
+      - NEXTAUTH_URL=${NEXTAUTH_URL}
+      - PYTHONUNBUFFERED=1
+      - OLLAMA_URL=http://ollama:11434
+    depends_on:
+      - db
+      - redis
+      - bert-service
+      - weaviate
+      - ollama
+    networks:
+      - laplace-network  # SOLO UNA RED
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  chat-worker:
+    build:
+      context: ./chat-worker
+      dockerfile: Dockerfile
+    volumes:
+      - ./chat-worker:/app
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - RABBITMQ_URL=amqp://admin:securepass123@rabbitmq:5672
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=admin
+      - RABBITMQ_PASS=securepass123
+      - OLLAMA_URL=http://ollama:11434
+      - WEAVIATE_URL=http://weaviate:8080
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      - rabbitmq
+      - redis
+      - ollama
+    networks:
+      - laplace-network  # SOLO UNA RED
+    restart: on-failure
+
+  bert-service:
+    build: ./bert-service
+    image: laplace/bert-service:latest
+    container_name: laplace_bert_service
+    ports:
+      - "5000:5000"
+    environment:
+      - MODEL_NAME=sentence-transformers/all-MiniLM-L6-v2
+      - MODEL_PATH=sentence-transformers/all-MiniLM-L6-v2
+      - DEVICE=cpu
+      - MAX_SEQUENCE_LENGTH=512
+    volumes:
+      - bert_cache:/app/models
+    networks:
+      - laplace-network  # SOLO UNA RED
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:5000/health" ]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  db:
+    image: postgres:13-alpine
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    environment:
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_USER=postgres
+      - POSTGRES_DB=laplace
+    ports:
+      - "5432:5432"
+    networks:
+      - laplace-network
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - laplace-network
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: laplace_rabbitmq
+    environment:
+      - RABBITMQ_DEFAULT_USER=admin
+      - RABBITMQ_DEFAULT_PASS=securepass123
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    networks:
+      - laplace-network
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: [ "CMD", "rabbitmqctl", "status" ]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
+  weaviate:
+    image: semitechnologies/weaviate:1.24.1
+    ports:
+      - "8080:8080"
+      - "50051:50051"
+    environment:
+      - QUERY_DEFAULTS_LIMIT=25
+      - AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED=true
+      - PERSISTENCE_DATA_PATH=/var/lib/weaviate
+      - DEFAULT_VECTORIZER_MODULE=none
+      - CLUSTER_HOSTNAME=node1
+      - LOG_LEVEL=info  # Cambiado de debug a info para menos logs
+      - GRPC_PORT=50051
+    volumes:
+      - weaviate_data:/var/lib/weaviate
+    networks:
+      - laplace-network  # SOLO UNA RED
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8080/v1/meta" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - laplace-network  # SOLO UNA RED
+    environment:
+      - OLLAMA_HOST=0.0.0.0:11434
+      - OLLAMA_KEEP_ALIVE=5m  # Reducido de 30m para liberar RAM más rápido
+      - OLLAMA_NUM_PARALLEL=1  # Solo 1 request simultáneo
+      - OLLAMA_CONTEXT_LENGTH=2048
+    # SIN HEALTHCHECK - ya vimos que funciona
+    restart: unless-stopped
+
+networks:
+  laplace-network:  # SOLO UNA RED
+    driver: bridge
+
+volumes:
+  postgres_data:
+  weaviate_data:
+  rabbitmq_data:
+  redis_data:
+  bert_cache:
+  ollama_data:
